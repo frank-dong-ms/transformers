@@ -268,8 +268,7 @@ class AttentionMaskConverter:
             #
             # Besides, jit.trace can not handle the `q_len > 1` condition for `is_causal` (`TypeError: scaled_dot_product_attention(): argument 'is_causal' must be bool, not Tensor`).
             if (
-                (is_training or not is_tracing)
-                and (query_length == 1 or key_value_length == query_length)
+                (query_length == 1 or key_value_length == query_length)
                 and (sliding_window is None or key_value_length < sliding_window)
             ):
                 ignore_causal_mask = True
