@@ -48,6 +48,12 @@ from ...utils import (
 )
 from .configuration_llama import LlamaConfig
 
+from .parallel_layers import (
+    get_world_size,
+    TensorParallelColumnLinear,
+    TensorParallelRowLinear,
+)
+
 
 logger = logging.get_logger(__name__)
 
@@ -172,9 +178,9 @@ class LlamaMLP(nn.Module):
         self.config = config
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
+        self.gate_proj = TensorParallelColumnLinear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
+        self.up_proj = TensorParallelColumnLinear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
+        self.down_proj = TensorParallelColumnLinear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
@@ -242,10 +248,10 @@ class LlamaAttention(nn.Module):
                 f" and `num_heads`: {self.num_heads})."
             )
 
-        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias)
-        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
-        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
-        self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=config.attention_bias)
+        self.q_proj = TensorParallelColumnLinear(self.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias)
+        self.k_proj = TensorParallelColumnLinear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
+        self.v_proj = TensorParallelColumnLinear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
+        self.o_proj = TensorParallelColumnLinear(self.hidden_size, self.hidden_size, bias=config.attention_bias)
         self._init_rope()
 
     def _init_rope(self):
@@ -357,6 +363,11 @@ class LlamaAttention(nn.Module):
             attn_weights = None
 
         return attn_output, attn_weights, past_key_value
+
+    def parallel_split(self):
+        world_size = get_world_size(None)
+        self.num_heads = self.num_heads // world_size
+        self.num_key_value_heads = self.num_key_value_heads // world_size
 
 
 class LlamaFlashAttention2(LlamaAttention):
@@ -1156,6 +1167,15 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             }
         )
         return model_inputs
+
+    def parallel_model(self):
+        def _split_model(model):
+            if isinstance(model, (TensorParallelColumnLinear, TensorParallelRowLinear, LlamaAttention)):
+                model.parallel_split()
+            for _, m in model._modules.items():
+                _split_model(m)
+
+        _split_model(self)
 
 
 @add_start_docstrings(
